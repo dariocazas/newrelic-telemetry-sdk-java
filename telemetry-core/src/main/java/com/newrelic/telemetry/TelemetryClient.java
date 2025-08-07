@@ -140,8 +140,7 @@ public class TelemetryClient {
    * @param batch batch metrics to be applied
    */
   public void sendBatch(MetricBatch batch) {
-    scheduleBatchSend(
-        (b) -> metricBatchSender.sendBatch((MetricBatch) b), batch, 0, TimeUnit.SECONDS);
+    sendBatch(batch, Backoff.defaultBackoff());
   }
 
   /**
@@ -152,7 +151,7 @@ public class TelemetryClient {
    * @param batch to be sent
    */
   public void sendBatch(SpanBatch batch) {
-    scheduleBatchSend((b) -> spanBatchSender.sendBatch((SpanBatch) b), batch, 0, TimeUnit.SECONDS);
+    sendBatch(batch, Backoff.defaultBackoff());
   }
 
   /**
@@ -163,8 +162,7 @@ public class TelemetryClient {
    * @param batch to be sent
    */
   public void sendBatch(EventBatch batch) {
-    scheduleBatchSend(
-        (b) -> eventBatchSender.sendBatch((EventBatch) b), batch, 0, TimeUnit.SECONDS);
+    sendBatch(batch, Backoff.defaultBackoff());
   }
 
   /**
@@ -175,15 +173,59 @@ public class TelemetryClient {
    * @param batch to be sent
    */
   public void sendBatch(LogBatch batch) {
-    scheduleBatchSend((b) -> logBatchSender.sendBatch((LogBatch) b), batch, 0, TimeUnit.SECONDS);
+    sendBatch(batch, Backoff.defaultBackoff());
   }
 
-  private void scheduleBatchSend(
-      BatchSender sender,
-      TelemetryBatch<? extends Telemetry> batch,
-      long waitTime,
-      TimeUnit timeUnit) {
-    scheduleBatchSend(sender, batch, waitTime, timeUnit, Backoff.defaultBackoff());
+  /**
+   * Send a batch of {@link com.newrelic.telemetry.metrics.Metric} instances, with custom backoff
+   * logic. This happens on a background thread, asynchronously, so currently there will be no
+   * feedback to the caller outside of the logs.
+   *
+   * @param batch batch metrics to be applied
+   * @param backoff the backoff strategy to use for retries
+   */
+  public void sendBatch(MetricBatch batch, Backoff backoff) {
+    scheduleBatchSend(
+        (b) -> metricBatchSender.sendBatch((MetricBatch) b), batch, 0, TimeUnit.SECONDS, backoff);
+  }
+
+  /**
+   * Send a batch of {@link com.newrelic.telemetry.spans.Span} instances, with custom backoff logic.
+   * This happens on a background thread, asynchronously, so currently there will be no feedback to
+   * the caller outside of the logs.
+   *
+   * @param batch to be sent
+   * @param backoff the backoff strategy to use for retries
+   */
+  public void sendBatch(SpanBatch batch, Backoff backoff) {
+    scheduleBatchSend(
+        (b) -> spanBatchSender.sendBatch((SpanBatch) b), batch, 0, TimeUnit.SECONDS, backoff);
+  }
+
+  /**
+   * Send a batch of {@link com.newrelic.telemetry.events.Event} instances, with custom backoff
+   * logic. This happens on a background thread, asynchronously, so currently there will be no
+   * feedback to the caller outside of the logs.
+   *
+   * @param batch to be sent
+   * @param backoff the backoff strategy to use for retries
+   */
+  public void sendBatch(EventBatch batch, Backoff backoff) {
+    scheduleBatchSend(
+        (b) -> eventBatchSender.sendBatch((EventBatch) b), batch, 0, TimeUnit.SECONDS, backoff);
+  }
+
+  /**
+   * Send a batch of {@link com.newrelic.telemetry.logs.Log} entries, with custom backoff logic.
+   * This happens on a background thread, asynchronously, so currently there will be no feedback to
+   * the caller outside of the logs.
+   *
+   * @param batch to be sent
+   * @param backoff the backoff strategy to use for retries
+   */
+  public void sendBatch(LogBatch batch, Backoff backoff) {
+    scheduleBatchSend(
+        (b) -> logBatchSender.sendBatch((LogBatch) b), batch, 0, TimeUnit.SECONDS, backoff);
   }
 
   private void scheduleBatchSend(
@@ -214,9 +256,9 @@ public class TelemetryClient {
     } catch (RetryWithBackoffException e) {
       backoff(batchSender, batch, backoff);
     } catch (RetryWithRequestedWaitException e) {
-      retry(batchSender, batch, e);
+      retry(batchSender, batch, backoff, e);
     } catch (RetryWithSplitException e) {
-      splitAndSend(batchSender, batch, e);
+      splitAndSend(batchSender, batch, backoff, e);
     } catch (ResponseException e) {
       if (notificationHandler != null) {
         notificationHandler.noticeError(
@@ -230,18 +272,19 @@ public class TelemetryClient {
   }
 
   private <T extends Telemetry> void splitAndSend(
-      BatchSender sender, TelemetryBatch<T> batch, RetryWithSplitException e) {
+      BatchSender sender, TelemetryBatch<T> batch, Backoff backoff, RetryWithSplitException e) {
     if (notificationHandler != null) {
       notificationHandler.noticeInfo("Batch size too large, splitting and retrying.", e, batch);
     }
     List<TelemetryBatch<T>> splitBatches = batch.split();
     splitBatches.forEach(
-        metricBatch -> scheduleBatchSend(sender, metricBatch, 0, TimeUnit.SECONDS));
+        metricBatch -> scheduleBatchSend(sender, metricBatch, 0, TimeUnit.SECONDS, backoff));
   }
 
   private void retry(
       BatchSender sender,
       TelemetryBatch<? extends Telemetry> batch,
+      Backoff backoff,
       RetryWithRequestedWaitException e) {
     if (notificationHandler != null) {
       notificationHandler.noticeInfo(
@@ -250,7 +293,7 @@ public class TelemetryClient {
               e.getWaitTime(), e.getTimeUnit()),
           batch);
     }
-    scheduleBatchSend(sender, batch, e.getWaitTime(), e.getTimeUnit());
+    scheduleBatchSend(sender, batch, e.getWaitTime(), e.getTimeUnit(), backoff);
   }
 
   private void backoff(
